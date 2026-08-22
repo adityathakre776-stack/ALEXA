@@ -1,0 +1,659 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <driver/i2s.h>
+
+// =====================================================
+// WIFI
+// =====================================================
+
+const char* WIFI_SSID = "Aditya";
+const char* WIFI_PASSWORD = "12345678";
+
+// =====================================================
+// LAPTOP / PYTHON SERVER
+// =====================================================
+
+const char* SERVER_IP = "10.97.91.189";
+const uint16_t SERVER_PORT = 5000;
+
+// =====================================================
+// INMP441
+// =====================================================
+
+#define I2S_PORT I2S_NUM_0
+
+#define I2S_BCLK 14
+#define I2S_WS   15
+#define I2S_DIN  32
+
+// =====================================================
+// AUDIO
+// =====================================================
+
+#define SAMPLE_RATE 16000
+#define RECORD_SECONDS 5
+
+#define AUDIO_SAMPLES \
+    (SAMPLE_RATE * RECORD_SECONDS)
+
+#define AUDIO_BYTES \
+    (AUDIO_SAMPLES * 2)
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup()
+{
+    Serial.begin(115200);
+
+    delay(1500);
+
+    Serial.println();
+    Serial.println("======================================");
+    Serial.println("     ESP32 VOICE RECOGNITION");
+    Serial.println("          INMP441 + WHISPER");
+    Serial.println("======================================");
+
+    // =================================================
+    // WIFI
+    // =================================================
+
+    WiFi.mode(WIFI_STA);
+
+    Serial.println();
+    Serial.println("Connecting to WiFi...");
+
+    WiFi.begin(
+        WIFI_SSID,
+        WIFI_PASSWORD
+    );
+
+    while (WiFi.status() != WL_CONNECTED)
+    {
+        delay(500);
+        Serial.print(".");
+    }
+
+    Serial.println();
+    Serial.println("WiFi connected!");
+
+    Serial.print("ESP32 IP: ");
+    Serial.println(WiFi.localIP());
+
+    Serial.print("Python Server: ");
+    Serial.print(SERVER_IP);
+    Serial.print(":");
+    Serial.println(SERVER_PORT);
+
+    // =================================================
+    // I2S CONFIGURATION
+    // =================================================
+
+    i2s_config_t i2s_config =
+    {
+        .mode =
+            (i2s_mode_t)(
+                I2S_MODE_MASTER |
+                I2S_MODE_RX
+            ),
+
+        .sample_rate =
+            SAMPLE_RATE,
+
+        .bits_per_sample =
+            I2S_BITS_PER_SAMPLE_32BIT,
+
+        .channel_format =
+            I2S_CHANNEL_FMT_ONLY_LEFT,
+
+        .communication_format =
+            I2S_COMM_FORMAT_STAND_I2S,
+
+        .intr_alloc_flags =
+            ESP_INTR_FLAG_LEVEL1,
+
+        .dma_buf_count = 8,
+
+        .dma_buf_len = 256,
+
+        .use_apll = false,
+
+        .tx_desc_auto_clear = false,
+
+        .fixed_mclk = 0
+    };
+
+    i2s_pin_config_t pin_config =
+    {
+        .bck_io_num =
+            I2S_BCLK,
+
+        .ws_io_num =
+            I2S_WS,
+
+        .data_out_num =
+            I2S_PIN_NO_CHANGE,
+
+        .data_in_num =
+            I2S_DIN
+    };
+
+    // =================================================
+    // INSTALL I2S
+    // =================================================
+
+    esp_err_t result;
+
+    result = i2s_driver_install(
+        I2S_PORT,
+        &i2s_config,
+        0,
+        NULL
+    );
+
+    if (result != ESP_OK)
+    {
+        Serial.println(
+            "ERROR: I2S driver failed!"
+        );
+
+        while (true)
+        {
+            delay(1000);
+        }
+    }
+
+    result = i2s_set_pin(
+        I2S_PORT,
+        &pin_config
+    );
+
+    if (result != ESP_OK)
+    {
+        Serial.println(
+            "ERROR: I2S pins failed!"
+        );
+
+        while (true)
+        {
+            delay(1000);
+        }
+    }
+
+    i2s_zero_dma_buffer(
+        I2S_PORT
+    );
+
+    Serial.println();
+    Serial.println("INMP441 initialized!");
+    Serial.println();
+    Serial.println("======================================");
+    Serial.println("             READY");
+    Serial.println("======================================");
+}
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop()
+{
+    Serial.println();
+    Serial.println("--------------------------------------");
+    Serial.println("🎤 Speak now...");
+    Serial.println("--------------------------------------");
+
+    bool result =
+        recordAndSend();
+
+    if (result)
+    {
+        Serial.println();
+        Serial.println("✅ Voice processing complete");
+    }
+    else
+    {
+        Serial.println();
+        Serial.println("❌ Voice processing failed");
+    }
+
+    delay(1000);
+}
+
+// =====================================================
+// RECORD + SEND
+// =====================================================
+
+bool recordAndSend()
+{
+    WiFiClient client;
+
+    // =================================================
+    // CONNECT SERVER
+    // =================================================
+
+    Serial.println(
+        "Connecting to Python..."
+    );
+
+    if (!client.connect(
+        SERVER_IP,
+        SERVER_PORT
+    ))
+    {
+        Serial.println(
+            "❌ Python server connection failed!"
+        );
+
+        return false;
+    }
+
+    Serial.println(
+        "✅ Python server connected"
+    );
+
+    // =================================================
+    // HTTP REQUEST
+    // =================================================
+
+    uint32_t totalAudioBytes =
+        AUDIO_BYTES;
+
+    uint32_t totalWavSize =
+        totalAudioBytes + 44;
+
+    client.println(
+        "POST /transcribe HTTP/1.1"
+    );
+
+    client.print(
+        "Host: "
+    );
+
+    client.println(
+        SERVER_IP
+    );
+
+    client.println(
+        "Content-Type: audio/wav"
+    );
+
+    client.print(
+        "Content-Length: "
+    );
+
+    client.println(
+        totalWavSize
+    );
+
+    client.println(
+        "Connection: close"
+    );
+
+    client.println();
+
+    // =================================================
+    // WAV HEADER
+    // =================================================
+
+    uint8_t wavHeader[44];
+
+    createWavHeader(
+        wavHeader,
+        totalAudioBytes,
+        SAMPLE_RATE
+    );
+
+    client.write(
+        wavHeader,
+        sizeof(wavHeader)
+    );
+
+    // =================================================
+    // RECORD AUDIO
+    // =================================================
+
+    int32_t rawBuffer[256];
+
+    int16_t audioBuffer[256];
+
+    uint32_t bytesSent = 0;
+
+    uint32_t startTime =
+        millis();
+
+    Serial.println();
+    Serial.println(
+        "🔴 RECORDING..."
+    );
+
+    while (
+        bytesSent < totalAudioBytes
+    )
+    {
+        size_t bytesRead = 0;
+
+        esp_err_t result =
+            i2s_read(
+                I2S_PORT,
+                rawBuffer,
+                sizeof(rawBuffer),
+                &bytesRead,
+                portMAX_DELAY
+            );
+
+        if (
+            result != ESP_OK
+        )
+        {
+            Serial.println(
+                "I2S read error!"
+            );
+
+            client.stop();
+
+            return false;
+        }
+
+        int samplesRead =
+            bytesRead / sizeof(int32_t);
+
+        for (
+            int i = 0;
+            i < samplesRead;
+            i++
+        )
+        {
+            // INMP441 produces 24-bit
+            // audio inside 32-bit word.
+
+            int32_t sample =
+                rawBuffer[i] >> 11;
+
+            // Prevent clipping
+
+            if (sample > 32767)
+                sample = 32767;
+
+            if (sample < -32768)
+                sample = -32768;
+
+            audioBuffer[i] =
+                (int16_t)sample;
+        }
+
+        uint32_t bytesToSend =
+            samplesRead * 2;
+
+        if (
+            bytesSent + bytesToSend >
+            totalAudioBytes
+        )
+        {
+            bytesToSend =
+                totalAudioBytes -
+                bytesSent;
+        }
+
+        client.write(
+            (uint8_t*)audioBuffer,
+            bytesToSend
+        );
+
+        bytesSent +=
+            bytesToSend;
+    }
+
+    Serial.println(
+        "🟢 RECORDING COMPLETE"
+    );
+
+    Serial.print(
+        "Audio bytes sent: "
+    );
+
+    Serial.println(
+        bytesSent
+    );
+
+    // =================================================
+    // WAIT FOR SERVER RESPONSE
+    // =================================================
+
+    Serial.println();
+    Serial.println(
+        "🧠 Waiting for Whisper..."
+    );
+
+    uint32_t timeoutStart =
+        millis();
+
+    while (
+        !client.available()
+    )
+    {
+        if (
+            millis() -
+            timeoutStart >
+            30000
+        )
+        {
+            Serial.println(
+                "❌ Whisper timeout!"
+            );
+
+            client.stop();
+
+            return false;
+        }
+
+        delay(10);
+    }
+
+    // =================================================
+    // HTTP STATUS
+    // =================================================
+
+    String status =
+        client.readStringUntil(
+            '\n'
+        );
+
+    status.trim();
+
+    Serial.print(
+        "HTTP: "
+    );
+
+    Serial.println(
+        status
+    );
+
+    // =================================================
+    // SKIP HTTP HEADERS
+    // =================================================
+
+    while (
+        client.connected()
+    )
+    {
+        String line =
+            client.readStringUntil(
+                '\n'
+            );
+
+        if (
+            line == "\r" ||
+            line.length() == 0
+        )
+        {
+            break;
+        }
+    }
+
+    // =================================================
+    // READ RESULT
+    // =================================================
+
+    Serial.println();
+    Serial.println(
+        "======================================"
+    );
+
+    Serial.println(
+        "       📝 RECOGNIZED VOICE"
+    );
+
+    Serial.println(
+        "======================================"
+    );
+
+    while (
+        client.available()
+    )
+    {
+        char c =
+            client.read();
+
+        Serial.print(c);
+    }
+
+    Serial.println();
+
+    Serial.println(
+        "======================================"
+    );
+
+    client.stop();
+
+    return true;
+}
+
+// =====================================================
+// WAV HEADER
+// =====================================================
+
+void createWavHeader(
+    uint8_t* header,
+    uint32_t dataSize,
+    uint32_t sampleRate
+)
+{
+    uint32_t fileSize =
+        dataSize + 36;
+
+    memset(
+        header,
+        0,
+        44
+    );
+
+    // RIFF
+
+    header[0] = 'R';
+    header[1] = 'I';
+    header[2] = 'F';
+    header[3] = 'F';
+
+    header[4] =
+        fileSize & 0xFF;
+
+    header[5] =
+        (fileSize >> 8) & 0xFF;
+
+    header[6] =
+        (fileSize >> 16) & 0xFF;
+
+    header[7] =
+        (fileSize >> 24) & 0xFF;
+
+    // WAVE
+
+    header[8] = 'W';
+    header[9] = 'A';
+    header[10] = 'V';
+    header[11] = 'E';
+
+    // fmt
+
+    header[12] = 'f';
+    header[13] = 'm';
+    header[14] = 't';
+    header[15] = ' ';
+
+    header[16] = 16;
+    header[17] = 0;
+    header[18] = 0;
+    header[19] = 0;
+
+    // PCM
+
+    header[20] = 1;
+    header[21] = 0;
+
+    // MONO
+
+    header[22] = 1;
+    header[23] = 0;
+
+    // Sample rate
+
+    header[24] =
+        sampleRate & 0xFF;
+
+    header[25] =
+        (sampleRate >> 8) & 0xFF;
+
+    header[26] =
+        (sampleRate >> 16) & 0xFF;
+
+    header[27] =
+        (sampleRate >> 24) & 0xFF;
+
+    // Byte rate
+
+    uint32_t byteRate =
+        sampleRate * 2;
+
+    header[28] =
+        byteRate & 0xFF;
+
+    header[29] =
+        (byteRate >> 8) & 0xFF;
+
+    header[30] =
+        (byteRate >> 16) & 0xFF;
+
+    header[31] =
+        (byteRate >> 24) & 0xFF;
+
+    // Block align
+
+    header[32] = 2;
+    header[33] = 0;
+
+    // Bits per sample
+
+    header[34] = 16;
+    header[35] = 0;
+
+    // data
+
+    header[36] = 'd';
+    header[37] = 'a';
+    header[38] = 't';
+    header[39] = 'a';
+
+    header[40] =
+        dataSize & 0xFF;
+
+    header[41] =
+        (dataSize >> 8) & 0xFF;
+
+    header[42] =
+        (dataSize >> 16) & 0xFF;
+
+    header[43] =
+        (dataSize >> 24) & 0xFF;
+}
